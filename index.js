@@ -7,8 +7,15 @@ const { google } = require("googleapis");
 
 dotenv.config();
 const app = express();
-
-app.use(cors({ origin: "http://localhost:3000", credentials: true }));
+app.use(
+  cors({
+    origin: [
+      "http://localhost:3000", // local development
+      "https://mail-classifier.vercel.app", // vercel production
+    ],
+    credentials: true,
+  })
+);
 
 const oauth2Client = new google.auth.OAuth2(
   process.env.GOOGLE_CLIENT_ID,
