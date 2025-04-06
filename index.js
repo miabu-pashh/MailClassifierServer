@@ -9,10 +9,7 @@ dotenv.config();
 const app = express();
 app.use(
   cors({
-    origin: [
-      "http://localhost:3000", // local development
-      "https://mail-classifier.vercel.app", // vercel production
-    ],
+    origin: ["https://mail-classifier.vercel.app"], // ✅ Add your Vercel frontend URL here
     credentials: true,
   })
 );
