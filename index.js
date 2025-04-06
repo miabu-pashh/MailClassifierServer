@@ -23,7 +23,7 @@ const oauth2Client = new google.auth.OAuth2(
 let cachedEmailsByDay = {};
 
 function classifyEmail(subject, body = "", from = "") {
-  const content = (subject + " " + body + " " + from).toLowerCase();
+  const content = `${subject} ${body}`.toLowerCase();
 
   if (
     content.includes("linkedin") ||
@@ -33,11 +33,15 @@ function classifyEmail(subject, body = "", from = "") {
   }
 
   if (
-    content.includes("unfortunately") ||
-    content.includes("we regret") ||
+    content.includes("we have decided not to move forward") ||
+    content.includes("unfortunately we have decided") ||
     content.includes("not selected") ||
-    content.includes("rejected") ||
-    content.includes("declined") ||
+    content.includes("didn't work out") ||
+    content.includes("application was not successful") ||
+    content.includes("no longer being considered") ||
+    content.includes("after careful consideration") ||
+    content.includes("we regret to inform you") ||
+    content.includes("rejection") ||
     content.includes("not moving forward")
   ) {
     return "Rejection";
