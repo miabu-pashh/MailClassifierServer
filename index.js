@@ -1,3 +1,5 @@
+// ✅ Smarter Backend with Regex + Company Extraction
+
 const express = require("express");
 const cors = require("cors");
 const dotenv = require("dotenv");
@@ -27,53 +29,54 @@ if (fs.existsSync(TOKEN_PATH)) {
 }
 
 let cachedEmailsByDay = {};
+let companySet = new Set();
 
 function classifyEmail(subject = "", body = "", from = "") {
   const text = `${subject} ${body}`.toLowerCase();
 
-  if (text.includes("linkedin") || from.includes("linkedin")) {
+  const interviewPatterns = [
+    /schedule.*interview/i,
+    /invite.*interview/i,
+    /technical.*(assessment|interview)/i,
+    /we.*like.*interview/i,
+    /move.*forward.*interview/i,
+    /calendar.*link/i,
+  ];
+
+  const rejectionPatterns = [
+    /we.*regret/i,
+    /not.*(moving|going).*forward/i,
+    /application.*(unsuccessful|declined|rejected)/i,
+    /no longer.*considered/i,
+    /unfortunately.*decision/i,
+    /after careful consideration/i,
+  ];
+
+  const linkedinPatterns = [/linkedin/i, /applied via linkedin/i];
+  const appliedPatterns = [/thank you for applying/i, /application received/i];
+
+  if (linkedinPatterns.some((r) => r.test(text)) || from.includes("linkedin")) {
     return "LinkedIn";
   }
 
-  if (
-    text.includes("we regret") ||
-    text.includes("we are sorry") ||
-    text.includes("not moving forward") ||
-    text.includes("unfortunately") ||
-    text.includes("we have decided not to") ||
-    text.includes("no longer being considered") ||
-    text.includes("didn't work out") ||
-    text.includes("we're unable to") ||
-    text.includes("we won't be proceeding") ||
-    text.includes("decline") ||
-    text.includes("not selected") ||
-    text.includes("rejection")
-  ) {
+  if (rejectionPatterns.some((r) => r.test(text))) {
     return "Rejection";
   }
 
-  if (
-    text.includes("interview") ||
-    text.includes("assessment") ||
-    text.includes("online test") ||
-    text.includes("technical screen") ||
-    text.includes("hiring manager") ||
-    text.includes("interview invite") ||
-    text.includes("please schedule")
-  ) {
+  if (interviewPatterns.some((r) => r.test(text))) {
     return "Interview";
   }
 
-  if (
-    text.includes("thank you for applying") ||
-    text.includes("we received your application") ||
-    text.includes("applied successfully") ||
-    text.includes("application received")
-  ) {
+  if (appliedPatterns.some((r) => r.test(text))) {
     return "Applied";
   }
 
   return "Uncategorized";
+}
+
+function extractCompany(from) {
+  const match = from.match(/@(.*?)\./);
+  return match ? match[1] : "Unknown";
 }
 
 async function fetchEmailsFromLast5Days() {
@@ -88,6 +91,7 @@ async function fetchEmailsFromLast5Days() {
 
     const messageIds = messagesRes.data.messages || [];
     const emails = [];
+    companySet.clear();
 
     for (const msg of messageIds) {
       const fullMessage = await gmail.users.messages.get({
@@ -101,7 +105,6 @@ async function fetchEmailsFromLast5Days() {
       const from = headers.find((h) => h.name === "From")?.value || "";
       const date = headers.find((h) => h.name === "Date")?.value || "";
 
-      // Get body content
       let body = "";
       const parts = fullMessage.data.payload.parts || [];
       const textPart =
@@ -110,11 +113,13 @@ async function fetchEmailsFromLast5Days() {
 
       if (textPart?.body?.data) {
         const buff = Buffer.from(textPart.body.data, "base64");
-        body = buff.toString("utf-8").replace(/<\/?[^>]+(>|$)/g, ""); // remove html tags
+        body = buff.toString("utf-8").replace(/<[^>]*>/g, "");
       }
 
       const classification = classifyEmail(subject, body, from);
-      emails.push({ subject, from, date, classification });
+      const company = extractCompany(from);
+      companySet.add(company);
+      emails.push({ subject, from, date, classification, company });
     }
 
     cachedEmailsByDay = emails.reduce((acc, email) => {
@@ -135,7 +140,7 @@ async function fetchEmailsFromLast5Days() {
   }
 }
 
-// OAuth Routes
+// OAuth routes
 app.get("/auth/google", (req, res) => {
   const authUrl = oauth2Client.generateAuthUrl({
     access_type: "offline",
@@ -163,12 +168,15 @@ app.get("/auth/google/callback", async (req, res) => {
   }
 });
 
-// Cached Emails Endpoint
+// 📍 APIs
 app.get("/emails", (req, res) => {
   res.json(cachedEmailsByDay);
 });
 
-// Refresh Emails Endpoint
+app.get("/companies", (req, res) => {
+  res.json({ companies: [...companySet] });
+});
+
 app.get("/refresh", async (req, res) => {
   try {
     await fetchEmailsFromLast5Days();
