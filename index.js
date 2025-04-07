@@ -1,9 +1,11 @@
-// ✅ Refined Backend with Intelligent Classification
+// ✅ Intelligent Backend for Mail Classifier App
 
 const express = require("express");
 const cors = require("cors");
 const dotenv = require("dotenv");
 const { google } = require("googleapis");
+const { decode } = require("html-entities");
+const base64 = require("base-64");
 
 dotenv.config();
 const app = express();
@@ -21,65 +23,52 @@ const oauth2Client = new google.auth.OAuth2(
 );
 
 let cachedEmailsByDay = {};
-let companyStats = {};
+let appliedCompanies = new Set();
 
-function classifyEmail(subject = "", body = "", from = "") {
-  const text = `${subject} ${body}`.toLowerCase();
+function classifyEmail(subject, body = "", from = "") {
+  const content = `${subject} ${body} ${from}`.toLowerCase();
 
-  if (text.includes("linkedin") || text.includes("applied via linkedin")) {
+  if (
+    content.includes("linkedin") ||
+    content.includes("applied via linkedin") ||
+    content.includes("job alert") ||
+    content.includes("job recommendation")
+  ) {
     return "LinkedIn";
   }
 
-  const rejectionKeywords = [
-    "we have decided not to move forward",
-    "unfortunately we have decided",
-    "not selected",
-    "didn't work out",
-    "application was not successful",
-    "no longer being considered",
-    "after careful consideration",
-    "we regret to inform you",
-    "rejection",
-    "not moving forward",
-  ];
-  const isRejection = rejectionKeywords.some((k) => text.includes(k));
-  if (isRejection) return "Rejection";
+  if (
+    /\b(thank you for applying|application (received|submitted))\b/.test(
+      content
+    )
+  ) {
+    return "Applied";
+  }
 
-  const interviewPhrases = [
-    "interview confirmed",
-    "your interview is scheduled",
-    "we look forward to speaking",
-    "zoom interview link",
-    "technical interview",
-    "please select a time slot",
-    "join us for an interview",
-    "assessment scheduled",
-    "invitation to interview",
-  ];
+  if (
+    /\b(we have decided not to move forward|unfortunately|not selected|rejected|no longer being considered|after careful consideration|we regret to inform)\b/.test(
+      content
+    )
+  ) {
+    return "Rejection";
+  }
 
-  const interviewFalsePositives = [
-    "we will contact you to schedule an interview",
-    "we may reach out to schedule",
-    "you may be contacted",
-  ];
-
-  const isInterview =
-    interviewPhrases.some((p) => text.includes(p)) &&
-    !interviewFalsePositives.some((p) => text.includes(p));
-
-  if (isInterview) return "Interview";
-
-  const appliedPhrases = [
-    "thank you for applying",
-    "your application has been received",
-    "we received your application",
-    "application submitted",
-    "your application is under review",
-  ];
-  const isApplied = appliedPhrases.some((p) => text.includes(p));
-  if (isApplied) return "Applied";
+  if (
+    /\b(interview|schedule|assessment|invite|calendly|zoom call|phone screen|discussion)\b/.test(
+      content
+    )
+  ) {
+    return "Interview";
+  }
 
   return "Uncategorized";
+}
+
+function extractCompany(fromField = "") {
+  const match = fromField.match(/<([^@]+)@([^>]+)>/);
+  return match
+    ? match[2].split(".")[0]
+    : fromField.split("@")[1]?.split(".")[0];
 }
 
 async function fetchEmailsFromLast5Days() {
@@ -94,7 +83,7 @@ async function fetchEmailsFromLast5Days() {
 
     const messageIds = messagesRes.data.messages || [];
     const emails = [];
-    companyStats = {};
+    appliedCompanies = new Set();
 
     for (const msg of messageIds) {
       const fullMessage = await gmail.users.messages.get({
@@ -107,14 +96,24 @@ async function fetchEmailsFromLast5Days() {
       const subject = headers.find((h) => h.name === "Subject")?.value || "";
       const from = headers.find((h) => h.name === "From")?.value || "";
       const date = headers.find((h) => h.name === "Date")?.value || "";
-      const snippet = fullMessage.data.snippet || "";
-      const classification = classifyEmail(subject, snippet, from);
 
-      const company = from.split("<")[0].trim();
-      if (!companyStats[company])
-        companyStats[company] = { applied: 0, interviews: 0 };
-      if (classification === "Applied") companyStats[company].applied++;
-      if (classification === "Interview") companyStats[company].interviews++;
+      const parts = fullMessage.data.payload.parts || [];
+      let body = "";
+      for (const part of parts) {
+        if (part.mimeType === "text/plain" || part.mimeType === "text/html") {
+          const data = part.body?.data;
+          if (data) {
+            body = decode(
+              base64.decode(data.replace(/-/g, "+").replace(/_/g, "/"))
+            );
+            break;
+          }
+        }
+      }
+
+      const classification = classifyEmail(subject, body, from);
+      const company = extractCompany(from);
+      if (classification === "Applied") appliedCompanies.add(company);
 
       emails.push({ subject, from, date, classification });
     }
@@ -137,7 +136,7 @@ async function fetchEmailsFromLast5Days() {
   }
 }
 
-// 📍 OAuth Routes
+// ✅ Auth Routes
 app.get("/auth/google", (req, res) => {
   const authUrl = oauth2Client.generateAuthUrl({
     access_type: "offline",
@@ -164,17 +163,10 @@ app.get("/auth/google/callback", async (req, res) => {
   }
 });
 
-// 📍 Cached Email Endpoint
 app.get("/emails", (req, res) => {
   res.json(cachedEmailsByDay);
 });
 
-// 📍 Stats for Companies Endpoint
-app.get("/companies", (req, res) => {
-  res.json(companyStats);
-});
-
-// 📍 Refresh Endpoint
 app.get("/refresh", async (req, res) => {
   try {
     await fetchEmailsFromLast5Days();
@@ -182,6 +174,10 @@ app.get("/refresh", async (req, res) => {
   } catch (err) {
     res.status(500).json({ error: "Failed to refresh emails" });
   }
+});
+
+app.get("/companies", (req, res) => {
+  res.json(Array.from(appliedCompanies));
 });
 
 const PORT = process.env.PORT || 8080;
