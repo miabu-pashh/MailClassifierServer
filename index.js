@@ -1,15 +1,15 @@
-// ✅ Final Backend with Refresh Route
-
 const express = require("express");
 const cors = require("cors");
 const dotenv = require("dotenv");
+const fs = require("fs");
 const { google } = require("googleapis");
 
 dotenv.config();
 const app = express();
+
 app.use(
   cors({
-    origin: ["https://mail-classifier.vercel.app"], // ✅ Add your Vercel frontend URL here
+    origin: ["https://mail-classifier.vercel.app"],
     credentials: true,
   })
 );
@@ -20,40 +20,57 @@ const oauth2Client = new google.auth.OAuth2(
   process.env.REDIRECT_URI
 );
 
+const TOKEN_PATH = "token.json";
+if (fs.existsSync(TOKEN_PATH)) {
+  const token = JSON.parse(fs.readFileSync(TOKEN_PATH));
+  oauth2Client.setCredentials(token);
+}
+
 let cachedEmailsByDay = {};
 
-function classifyEmail(subject, body = "", from = "") {
-  const content = `${subject} ${body}`.toLowerCase();
+function classifyEmail(subject = "", body = "", from = "") {
+  const text = `${subject} ${body}`.toLowerCase();
 
-  if (
-    content.includes("linkedin") ||
-    content.includes("applied via linkedin")
-  ) {
+  if (text.includes("linkedin") || from.includes("linkedin")) {
     return "LinkedIn";
   }
 
   if (
-    content.includes("we have decided not to move forward") ||
-    content.includes("unfortunately we have decided") ||
-    content.includes("not selected") ||
-    content.includes("didn't work out") ||
-    content.includes("application was not successful") ||
-    content.includes("no longer being considered") ||
-    content.includes("after careful consideration") ||
-    content.includes("we regret to inform you") ||
-    content.includes("rejection") ||
-    content.includes("not moving forward")
+    text.includes("we regret") ||
+    text.includes("we are sorry") ||
+    text.includes("not moving forward") ||
+    text.includes("unfortunately") ||
+    text.includes("we have decided not to") ||
+    text.includes("no longer being considered") ||
+    text.includes("didn't work out") ||
+    text.includes("we're unable to") ||
+    text.includes("we won't be proceeding") ||
+    text.includes("decline") ||
+    text.includes("not selected") ||
+    text.includes("rejection")
   ) {
     return "Rejection";
   }
 
   if (
-    content.includes("interview") ||
-    content.includes("schedule") ||
-    content.includes("assessment") ||
-    content.includes("invite")
+    text.includes("interview") ||
+    text.includes("assessment") ||
+    text.includes("online test") ||
+    text.includes("technical screen") ||
+    text.includes("hiring manager") ||
+    text.includes("interview invite") ||
+    text.includes("please schedule")
   ) {
     return "Interview";
+  }
+
+  if (
+    text.includes("thank you for applying") ||
+    text.includes("we received your application") ||
+    text.includes("applied successfully") ||
+    text.includes("application received")
+  ) {
+    return "Applied";
   }
 
   return "Uncategorized";
@@ -83,8 +100,20 @@ async function fetchEmailsFromLast5Days() {
       const subject = headers.find((h) => h.name === "Subject")?.value || "";
       const from = headers.find((h) => h.name === "From")?.value || "";
       const date = headers.find((h) => h.name === "Date")?.value || "";
-      const classification = classifyEmail(subject, "", from);
 
+      // Get body content
+      let body = "";
+      const parts = fullMessage.data.payload.parts || [];
+      const textPart =
+        parts.find((p) => p.mimeType === "text/plain") ||
+        parts.find((p) => p.mimeType === "text/html");
+
+      if (textPart?.body?.data) {
+        const buff = Buffer.from(textPart.body.data, "base64");
+        body = buff.toString("utf-8").replace(/<\/?[^>]+(>|$)/g, ""); // remove html tags
+      }
+
+      const classification = classifyEmail(subject, body, from);
       emails.push({ subject, from, date, classification });
     }
 
@@ -106,7 +135,7 @@ async function fetchEmailsFromLast5Days() {
   }
 }
 
-// 📍 OAuth Routes
+// OAuth Routes
 app.get("/auth/google", (req, res) => {
   const authUrl = oauth2Client.generateAuthUrl({
     access_type: "offline",
@@ -125,20 +154,21 @@ app.get("/auth/google/callback", async (req, res) => {
   try {
     const { tokens } = await oauth2Client.getToken(code);
     oauth2Client.setCredentials(tokens);
+    fs.writeFileSync(TOKEN_PATH, JSON.stringify(tokens));
     await fetchEmailsFromLast5Days();
-    res.redirect("http://localhost:3000");
+    res.redirect("https://mail-classifier.vercel.app");
   } catch (err) {
     console.error("Callback error:", err.message);
     res.status(500).send("Authentication failed");
   }
 });
 
-// 📍 Cached Email Endpoint
+// Cached Emails Endpoint
 app.get("/emails", (req, res) => {
   res.json(cachedEmailsByDay);
 });
 
-// 📍 Refresh Endpoint
+// Refresh Emails Endpoint
 app.get("/refresh", async (req, res) => {
   try {
     await fetchEmailsFromLast5Days();
