@@ -1,14 +1,12 @@
-// ✅ Smarter Backend with Regex + Company Extraction
+// ✅ Refined Backend with Intelligent Classification
 
 const express = require("express");
 const cors = require("cors");
 const dotenv = require("dotenv");
-const fs = require("fs");
 const { google } = require("googleapis");
 
 dotenv.config();
 const app = express();
-
 app.use(
   cors({
     origin: ["https://mail-classifier.vercel.app"],
@@ -22,61 +20,66 @@ const oauth2Client = new google.auth.OAuth2(
   process.env.REDIRECT_URI
 );
 
-const TOKEN_PATH = "token.json";
-if (fs.existsSync(TOKEN_PATH)) {
-  const token = JSON.parse(fs.readFileSync(TOKEN_PATH));
-  oauth2Client.setCredentials(token);
-}
-
 let cachedEmailsByDay = {};
-let companySet = new Set();
+let companyStats = {};
 
 function classifyEmail(subject = "", body = "", from = "") {
   const text = `${subject} ${body}`.toLowerCase();
 
-  const interviewPatterns = [
-    /schedule.*interview/i,
-    /invite.*interview/i,
-    /technical.*(assessment|interview)/i,
-    /we.*like.*interview/i,
-    /move.*forward.*interview/i,
-    /calendar.*link/i,
-  ];
-
-  const rejectionPatterns = [
-    /we.*regret/i,
-    /not.*(moving|going).*forward/i,
-    /application.*(unsuccessful|declined|rejected)/i,
-    /no longer.*considered/i,
-    /unfortunately.*decision/i,
-    /after careful consideration/i,
-  ];
-
-  const linkedinPatterns = [/linkedin/i, /applied via linkedin/i];
-  const appliedPatterns = [/thank you for applying/i, /application received/i];
-
-  if (linkedinPatterns.some((r) => r.test(text)) || from.includes("linkedin")) {
+  if (text.includes("linkedin") || text.includes("applied via linkedin")) {
     return "LinkedIn";
   }
 
-  if (rejectionPatterns.some((r) => r.test(text))) {
-    return "Rejection";
-  }
+  const rejectionKeywords = [
+    "we have decided not to move forward",
+    "unfortunately we have decided",
+    "not selected",
+    "didn't work out",
+    "application was not successful",
+    "no longer being considered",
+    "after careful consideration",
+    "we regret to inform you",
+    "rejection",
+    "not moving forward",
+  ];
+  const isRejection = rejectionKeywords.some((k) => text.includes(k));
+  if (isRejection) return "Rejection";
 
-  if (interviewPatterns.some((r) => r.test(text))) {
-    return "Interview";
-  }
+  const interviewPhrases = [
+    "interview confirmed",
+    "your interview is scheduled",
+    "we look forward to speaking",
+    "zoom interview link",
+    "technical interview",
+    "please select a time slot",
+    "join us for an interview",
+    "assessment scheduled",
+    "invitation to interview",
+  ];
 
-  if (appliedPatterns.some((r) => r.test(text))) {
-    return "Applied";
-  }
+  const interviewFalsePositives = [
+    "we will contact you to schedule an interview",
+    "we may reach out to schedule",
+    "you may be contacted",
+  ];
+
+  const isInterview =
+    interviewPhrases.some((p) => text.includes(p)) &&
+    !interviewFalsePositives.some((p) => text.includes(p));
+
+  if (isInterview) return "Interview";
+
+  const appliedPhrases = [
+    "thank you for applying",
+    "your application has been received",
+    "we received your application",
+    "application submitted",
+    "your application is under review",
+  ];
+  const isApplied = appliedPhrases.some((p) => text.includes(p));
+  if (isApplied) return "Applied";
 
   return "Uncategorized";
-}
-
-function extractCompany(from) {
-  const match = from.match(/@(.*?)\./);
-  return match ? match[1] : "Unknown";
 }
 
 async function fetchEmailsFromLast5Days() {
@@ -91,7 +94,7 @@ async function fetchEmailsFromLast5Days() {
 
     const messageIds = messagesRes.data.messages || [];
     const emails = [];
-    companySet.clear();
+    companyStats = {};
 
     for (const msg of messageIds) {
       const fullMessage = await gmail.users.messages.get({
@@ -104,22 +107,16 @@ async function fetchEmailsFromLast5Days() {
       const subject = headers.find((h) => h.name === "Subject")?.value || "";
       const from = headers.find((h) => h.name === "From")?.value || "";
       const date = headers.find((h) => h.name === "Date")?.value || "";
+      const snippet = fullMessage.data.snippet || "";
+      const classification = classifyEmail(subject, snippet, from);
 
-      let body = "";
-      const parts = fullMessage.data.payload.parts || [];
-      const textPart =
-        parts.find((p) => p.mimeType === "text/plain") ||
-        parts.find((p) => p.mimeType === "text/html");
+      const company = from.split("<")[0].trim();
+      if (!companyStats[company])
+        companyStats[company] = { applied: 0, interviews: 0 };
+      if (classification === "Applied") companyStats[company].applied++;
+      if (classification === "Interview") companyStats[company].interviews++;
 
-      if (textPart?.body?.data) {
-        const buff = Buffer.from(textPart.body.data, "base64");
-        body = buff.toString("utf-8").replace(/<[^>]*>/g, "");
-      }
-
-      const classification = classifyEmail(subject, body, from);
-      const company = extractCompany(from);
-      companySet.add(company);
-      emails.push({ subject, from, date, classification, company });
+      emails.push({ subject, from, date, classification });
     }
 
     cachedEmailsByDay = emails.reduce((acc, email) => {
@@ -140,7 +137,7 @@ async function fetchEmailsFromLast5Days() {
   }
 }
 
-// OAuth routes
+// 📍 OAuth Routes
 app.get("/auth/google", (req, res) => {
   const authUrl = oauth2Client.generateAuthUrl({
     access_type: "offline",
@@ -159,7 +156,6 @@ app.get("/auth/google/callback", async (req, res) => {
   try {
     const { tokens } = await oauth2Client.getToken(code);
     oauth2Client.setCredentials(tokens);
-    fs.writeFileSync(TOKEN_PATH, JSON.stringify(tokens));
     await fetchEmailsFromLast5Days();
     res.redirect("https://mail-classifier.vercel.app");
   } catch (err) {
@@ -168,15 +164,17 @@ app.get("/auth/google/callback", async (req, res) => {
   }
 });
 
-// 📍 APIs
+// 📍 Cached Email Endpoint
 app.get("/emails", (req, res) => {
   res.json(cachedEmailsByDay);
 });
 
+// 📍 Stats for Companies Endpoint
 app.get("/companies", (req, res) => {
-  res.json({ companies: [...companySet] });
+  res.json(companyStats);
 });
 
+// 📍 Refresh Endpoint
 app.get("/refresh", async (req, res) => {
   try {
     await fetchEmailsFromLast5Days();
